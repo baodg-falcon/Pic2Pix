@@ -12,6 +12,8 @@ import numpy as np
 from collections import Counter
 from sklearn.cluster import KMeans
 from skimage import color
+from skimage.color import deltaE_ciede2000
+import math
 
 
 # DEFAULT COLOR PALETTE
@@ -32,8 +34,8 @@ def rgb_to_hex(rgb_tuple):
 class PixelArtTool:
     def __init__(self, root):
         self.root = root
-        self.root.title("Pic2Pix v1.1")
-        self.root.geometry("1200x750")
+        self.root.title("Pic2Pix")
+        self.root.state('zoomed') # maximized window
 
         self.original_image = None
         self.processed_image = None
@@ -48,7 +50,7 @@ class PixelArtTool:
         self.zoom_scale_processed = 1.0
         self.is_showing_original = False
 
-        # INTERFACE
+        # CONTROL INTERFACE
         self.control_frame = tk.Frame(root, width=350, padx=10, pady=10)
         self.control_frame.pack(side=tk.LEFT, fill=tk.Y)
 
@@ -76,8 +78,8 @@ class PixelArtTool:
         self.palette_frame = tk.Frame(self.control_frame)
         self.palette_frame.pack(fill=tk.X)
         self.palette_buttons = []
-        # 5x3 color grid
-        for i in range(20):
+        # color grid
+        for i in range(len(self.current_palette_hex)):
             btn = tk.Button(self.palette_frame, bg=self.current_palette_hex[i], width=4, height=1, 
                             command=lambda idx=i: self.change_palette_color(idx))
             btn.grid(row=i//5, column=i%5, padx=2, pady=2)
@@ -168,16 +170,16 @@ class PixelArtTool:
         if file_path:
             self.original_image = Image.open(file_path).convert("RGB")
             w, h = self.original_image.size
-            ratio = w / h
-            self.width_var.set(64)
-            self.height_var.set(int(64 / ratio))
+            g = math.gcd(w, h)
+            self.width_var.set(w // g)
+            self.height_var.set(h // g)
             
             self.zoom_scale_original = 1.0 
             self.zoom_scale_processed = 1.0 
             self.processed_image = None
             
             self.show_preview(self.original_image, self.zoom_scale_original)
-
+ 
 
     # --- IMAGE PREVIEW ---
     def show_preview(self, img, zoom_factor):
@@ -208,36 +210,6 @@ class PixelArtTool:
 
 
     # ===================== CORE: IMAGE PROCESSING ====================
-    # Support: Get HSL distance
-    # def get_weighted_distance(self, c1, c2):
-
-    #     # convert RGB to HLS
-    #     r1, g1, b1 = c1[0]/255.0, c1[1]/255.0, c1[2]/255.0
-    #     r2, g2, b2 = c2[0]/255.0, c2[1]/255.0, c2[2]/255.0
-    #     h1, l1, s1 = colorsys.rgb_to_hls(r1, g1, b1)
-    #     h2, l2, s2 = colorsys.rgb_to_hls(r2, g2, b2)
-
-    #     # grayscale logic
-    #     # if saturation(s) < 0.15, hue(h) would have least to none impact on human eye
-    #     # if s1 < 0.15 or s2 < 0.15:
-    #     #     # get dist of light(l) and saturation now
-    #     #     return abs(l1 - l2) * 2.0 + abs(s1 - s2) # *1.0
-        
-    #     # diff
-    #     diff_hue = abs(h2 - h1)
-    #     # if diff_hue > 0.5:
-    #     #     diff_hue = 1 - diff_hue
-    #     diff_light = abs(l1 - l2)
-    #     diff_saturation = abs(s1 - s2)
-
-    #     # CALCULATE WEIGHTED DISTANCE
-    #     hue_weight = 1
-    #     light_weight = 1
-    #     saturation_weight = 1
-
-    #     dist = math.sqrt((diff_hue * hue_weight)**2 + (diff_light * light_weight)**2 + (diff_saturation * saturation_weight)**2)
-
-    #     return dist
 
     # MAIN: PROCESS IMAGE
     def process_image(self):
@@ -255,7 +227,6 @@ class PixelArtTool:
         h, w, d = img_small_array.shape
         pixels_small = img_small_array.reshape((h * w, d))
 
-        # ----- CHUYỂN SANG LAB -----
         # skimage.color.rgb2lab expects floats in [0,1]
         pixels_small_float = pixels_small.astype(np.float32) / 255.0
         # rgb2lab can accept shape (1, N, 3) as an "image" and return (1, N, 3)
@@ -276,29 +247,28 @@ class PixelArtTool:
         dist_matrix = np.zeros((target_k, len(self.palette_np)), dtype=np.float64)
 
         # Option A (default): ΔE76 ≈ Euclidean distance in LAB
-        for i, center_lab in enumerate(dominant_colors_lab):
-            # Broadcasting: compute distance to all palette colors quickly
-            dists = np.linalg.norm(palette_lab - center_lab, axis=1)
-            dist_matrix[i, :] = dists
-
-        # --- Nếu bạn muốn dùng ΔE2000 (chính xác hơn), bỏ chú thích đoạn này ---
-        # from skimage.color import deltaE_ciede2000
         # for i, center_lab in enumerate(dominant_colors_lab):
-        #     # deltaE_ciede2000 expects arrays of same shape; stack center to palette shape
-        #     center_stack = np.tile(center_lab[np.newaxis, :], (palette_lab.shape[0], 1))
-        #     dist_matrix[i, :] = deltaE_ciede2000(center_stack, palette_lab)
+        #     # Broadcasting: compute distance to all palette colors quickly
+        #     dists = np.linalg.norm(palette_lab - center_lab, axis=1)
+        #     dist_matrix[i, :] = dists
 
-        # 2. Initial assignment: mỗi cụm chọn màu palette gần nhất
+        # Option B: ΔE2000
+        for i, center_lab in enumerate(dominant_colors_lab):
+            # deltaE_ciede2000 expects arrays of same shape; stack center to palette shape
+            center_stack = np.tile(center_lab[np.newaxis, :], (palette_lab.shape[0], 1))
+            dist_matrix[i, :] = deltaE_ciede2000(center_stack, palette_lab)
+
+        # 2. Initial assignment
         initial_assignment = np.argmin(dist_matrix, axis=1)
 
-        # 3. Xử lý xung đột (giữ nguyên logic của bạn, chỉ lưu ý threshold bây giờ là "ΔE units")
+        # 3. Conflicts resolution
         final_mapping = {}  # {cluster_idx: palette_idx}
         palette_usage = {}
         for cluster_idx, pal_idx in enumerate(initial_assignment):
             palette_usage.setdefault(pal_idx, []).append(cluster_idx)
 
-        # HALLUCINATION_THRESHOLD là khác biệt ΔE tối đa chấp nhận được khi đổi màu (đơn vị ΔE)
-        HALLUCINATION_THRESHOLD = 15.0
+        # HALLUCINATION_THRESHOLD (ΔE)
+        HALLUCINATION_THRESHOLD = 5.0
 
         used_palette_indices = set(palette_usage.keys())
 
@@ -322,7 +292,7 @@ class PixelArtTool:
                         if candidate_pal_idx == pal_idx:
                             continue
 
-                        # ưu tiên palette chưa dùng
+                        # Prioritize unused palette
                         if candidate_pal_idx not in used_palette_indices:
                             new_dist = dist_matrix[l_idx][candidate_pal_idx]
                             if new_dist - original_best_dist < HALLUCINATION_THRESHOLD:
@@ -340,10 +310,10 @@ class PixelArtTool:
         for i in range(target_k):
             mask = (pixel_labels == i)
             pal_idx = final_mapping.get(i, initial_assignment[i])
-            color_val = self.palette_np[pal_idx]  # kiểu uint8 RGB [0..255]
+            color_val = self.palette_np[pal_idx]  # uint8 RGB [0..255]
             final_pixels[mask] = color_val
 
-        # --- THỐNG KÊ ---
+        # --- STATS ---
         final_pixels_list = [tuple(row) for row in final_pixels]
         stats = Counter(final_pixels_list)
         print(f"Target K: {target_k} | Actual Used: {len(stats)}")
